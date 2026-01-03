@@ -1,0 +1,32 @@
+version: "3.9"
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: metlife
+      POSTGRES_USER: metlife
+      POSTGRES_PASSWORD: metlife
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U metlife -d metlife"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  app:
+    build: .
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      POSTGRES_DB: metlife
+      POSTGRES_USER: metlife
+      POSTGRES_PASSWORD: metlife
+      OPTUNA_STORAGE_URL: sqlite:////app/optuna/optuna_study.db
+    volumes:
+      - ./artifacts:/app/artifacts
+      - ./optuna:/app/optuna
