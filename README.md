@@ -1,24 +1,29 @@
-# MetLife Challenge — Predicción de costos de seguro médico (Charges)
+# Predicción de Costos de Seguro Médico: End-to-End Pipeline
 
-Este repositorio contiene una solución **end-to-end** para predecir el costo de seguro médico (`charges`) usando el dataset provisto (`data/dataset.csv`). La solución incluye:
+Este repositorio contiene una solución automatizada **end-to-end** para predecir el costo de seguros médicos (`charges`) utilizando datos históricos. La arquitectura está diseñada para simular un entorno de producción, abarcando desde la ingesta de datos en bases relacionales hasta el entrenamiento y despliegue del modelo.
 
-- Ingesta del CSV en una **base PostgreSQL** (tabla `training_dataset`)
-- **Pipeline de entrenamiento** con preprocesamiento + **optimización bayesiana (Optuna/TPE)** + **LightGBM**
-- **Pipeline de scoring** sobre una tabla de prueba (10 filas) + reporte de métrica final
-- Ejecución **dockerizada** (los pasos 2 → 3 → 4 se ejecutan secuencialmente sin intervención)
+## Arquitectura de la Solución
 
----
-
-## 1) Enfoque de modelado (breve justificación)
-
-El problema es de **regresión sobre datos tabulares** con variables numéricas y categóricas, y con potenciales **no linealidades e interacciones** (por ejemplo, `smoker` × `bmi` × `age`). Por este motivo, se eligió un modelo de **Gradient Boosting con árboles** (LightGBM), ya que suele tener muy buen desempeño en datos tabulares y captura relaciones no lineales e interacciones de forma natural. Para seleccionar hiperparámetros de manera eficiente se utiliza **optimización bayesiana** con Optuna (sampler TPE) y validación cruzada.
+El flujo de trabajo se divide en los siguientes componentes principales:
+- Ingesta de datos crudos en una **base de datos PostgreSQL**.
+- **Pipeline de entrenamiento** automatizado que incluye preprocesamiento, **optimización bayesiana (Optuna/TPE)** y entrenamiento de un modelo **LightGBM**.
+- **Pipeline de scoring (inferencia)** para realizar predicciones sobre nuevos lotes de datos y generar reportes de métricas.
+- Entorno de ejecución completamente **dockerizado** para garantizar reproducibilidad.
 
 ---
 
-## Estructura del proyecto
+## 1. Enfoque de Modelado
+
+El problema se abordó como una tarea de **regresión sobre datos tabulares** con variables numéricas y categóricas. Dado el potencial de no linealidades e interacciones complejas en este dominio (por ejemplo, `smoker` × `bmi` × `age`), se implementó un modelo de **Gradient Boosting** (LightGBM). Este algoritmo destaca en datos tabulares y captura interacciones de forma nativa. 
+
+Para asegurar la robustez del modelo y una selección eficiente de hiperparámetros, se integró **optimización bayesiana** con Optuna (sampler TPE) evaluada mediante validación cruzada (K-Fold CV).
+
+---
+
+## 2. Estructura del Proyecto
 
 ```text
-metlife_challenge/
+medical_insurance_prediction/
 │
 ├── data/
 │   └── dataset.csv
@@ -48,12 +53,12 @@ metlife_challenge/
 │       └── io.py               # Save/load modelo + guardar métricas
 │
 ├── scripts/
-│   ├── create_db_and_load_data.py  # Paso 2: crea tablas + carga CSV
-│   ├── training.py                 # Paso 3: orquesta train+eval+save
-│   └── scoring.py                  # Paso 4: samplea 10 del holdout + predice
+│   ├── create_db_and_load_data.py  # Fase 1: crea tablas + carga CSV
+│   ├── training.py                 # Fase 2: orquesta train+eval+save
+│   └── scoring.py                  # Fase 3: samplea 10 del holdout + predice
 │
 ├── docker/
-│   └── entrypoint.sh           # Paso 5: corre 2->3->4 secuencialmente
+│   └── entrypoint.sh           # Orquesta ejecución secuencial (Fases 1 -> 2 -> 3)
 │
 ├── requirements.txt
 ├── Dockerfile
@@ -62,73 +67,31 @@ metlife_challenge/
 ```
 
 
+## 3. Fases del Pipeline
 
----
+### Fase 1: Ingesta de Datos (`create_db_and_load_data.py`)
+- Crea el esquema en PostgreSQL: tabla *staging* y tabla final de producción.
+- Carga los datos crudos, normaliza tipos de datos y transforma variables lógicas (ej. `smoker` a formato booleano nativo).
 
-## Mapeo del challenge (requisitos → implementación)
+### Fase 2: Entrenamiento y Optimización (`training.py`)
+1. Extrae los datos de entrenamiento directamente desde PostgreSQL.
+2. Aplica un split de *Holdout* aislando un 20% de los datos para validación final.
+3. Define el preprocesamiento de características (One-Hot Encoding para categóricas, *passthrough* para numéricas).
+4. Ejecuta **Optuna (TPE)** con **K-Fold CV** sobre el conjunto de entrenamiento.
+5. Re-entrena el modelo LightGBM final utilizando los mejores hiperparámetros encontrados.
+6. Persiste los artefactos del modelo (`best_model.joblib`) y registra las métricas de rendimiento (`RMSE`).
+7. Guarda el set de *Holdout* en la base de datos como `holdout_test_dataset` para simulaciones de inferencia futuras.
 
-### ✅ Paso 2 — Crear instancia de DB y cargar `dataset.csv` en `training_dataset`
-**Script:** `scripts/create_db_and_load_data.py`
-
-- Crea dos tablas:
-  - `training_dataset_raw` (staging, tipos similares al CSV)
-  - `training_dataset` (tabla final, incluye `id SERIAL PRIMARY KEY` y `smoker BOOLEAN`)
-- Carga `data/dataset.csv` en la tabla staging y luego inserta en la tabla final
-- Convierte `smoker` de `"yes"/"no"` a boolean con la lógica `smoker = 'yes'`
-
----
-
-### ✅ Paso 3 — Pipeline de entrenamiento
-**Orquestador:** `scripts/training.py`
-
-Realiza lo siguiente:
-
-1. Lee la tabla `training_dataset` desde PostgreSQL
-2. Hace un **train/test split** (holdout) con `test_size=0.2`
-3. Define el preprocesamiento:
-   - Numéricas: passthrough (`age`, `bmi`, `children`)
-   - Categóricas: One-Hot Encoding (`sex`, `region`)
-   - Binaria: passthrough (`smoker`)
-4. Ejecuta **Optuna (TPE)** con **K-Fold CV** sobre el conjunto de train (80%)
-5. Entrena el modelo final con los **mejores hiperparámetros** sobre todo el train
-6. Evalúa y guarda métricas:
-   - `CV_RMSE_best_trial` (valor óptimo encontrado por Optuna)
-   - `CV_RMSE_mean` / `CV_RMSE_std` recalculados para los `best_params`
-   - `TEST_RMSE` sobre el holdout (20%) **no utilizado** en la optimización
-7. Guarda artefactos:
-   - `artifacts/best_model.joblib`
-   - `artifacts/metrics.txt`
-8. Guarda el holdout en la DB como `holdout_test_dataset` para usar luego en `scoring.py`
-
----
-
-### ✅ Paso 4 — Pipeline de scoring
-**Script:** `scripts/scoring.py`
-
-- Lee `holdout_test_dataset` desde PostgreSQL (no usado en Optuna)
-- Samplea 10 filas con `random_state=42`
-- Carga el modelo entrenado (`artifacts/best_model.joblib`) y predice
-- Escribe resultados en la tabla `scoring_results` (incluye `predicted_charges`)
-- Reporta RMSE sobre esas 10 filas y lo guarda en `artifacts/scoring_metrics.txt`
+### Fase 3: Inferencia y Scoring (`scoring.py`)
+- Simula un entorno de producción extrayendo muestras aleatorias del set de prueba desde PostgreSQL (datos no vistos por Optuna).
+- Carga el modelo pre-entrenado y genera predicciones (`predicted_charges`).
+- Registra los resultados en una nueva tabla de la base de datos (`scoring_results`) y exporta las métricas de rendimiento finales.
 
 
----
 
-### ✅ Paso 5 — Docker: empaquetado y ejecución end-to-end
-- `Dockerfile` construye una imagen con Python + dependencias
-- `docker-compose.yml` levanta:
-  - un contenedor `postgres`
-  - un contenedor `app` que corre el pipeline
-- `docker/entrypoint.sh` orquesta:
-  1) Paso 2 (DB + carga CSV)  
-  2) Paso 3 (training)  
-  3) Paso 4 (scoring)  
+## 4. Despliegue y Ejecución (Docker Compose)
 
----
-
-## Cómo ejecutar: Docker Compose
-
-Desde la **raíz del proyecto**:
+El proyecto está diseñado para ejecutarse secuencialmente sin intervención manual. Desde la **raíz del proyecto**, ejecuta:
 
 ```bash
 docker compose up --build --abort-on-container-exit --exit-code-from app
@@ -136,9 +99,9 @@ docker compose up --build --abort-on-container-exit --exit-code-from app
 
 Esto:
 
-* Inicia Postgres
-* Construye la imagen de la app
-* Ejecuta secuencialmente los pasos 2 → 3 → 4
+* Inicia la instancia de PostgreSQL.
+* Construye la imagen de la aplicación (Python + dependencias).
+* Ejecuta secuencialmente las Fases 1 → 2 → 3.
 * Finaliza con `exit code 0` si todo salió bien
 
 ### Re-ejecución “limpia” (borra DB/volúmenes)
@@ -149,7 +112,7 @@ docker compose down -v
 docker compose up --build --abort-on-container-exit --exit-code-from app
 ```
 
-## Salidas 
+## 5. Salidas Generadas 
 
 Al finalizar la ejecución se generan en la carpeta `artifacts/`:
 
@@ -158,7 +121,7 @@ Al finalizar la ejecución se generan en la carpeta `artifacts/`:
 * `scoring_metrics.txt`: Métrica del scoring (sobre 10 filas).
 * `optuna_study.db`: Estudio de Optuna persistido (en la carpeta `optuna/`).
 
-## Métrica y evaluación
+## 6. Métrica y evaluación
 
 Se utiliza **RMSE** (Root Mean Squared Error) como métrica principal.
 
@@ -168,7 +131,7 @@ Se utiliza **RMSE** (Root Mean Squared Error) como métrica principal.
 
 * **Scoring**: Reporta RMSE en 10 filas muestreadas para validar el flujo end-to-end.
 
-## Dependencias
+## 7. Dependencias y Tecnologías
 
 Ver `requirements.txt`:
 
@@ -179,7 +142,7 @@ Ver `requirements.txt`:
 * optuna
 * joblib
 
-## Notas
+## 8. Notas Técnicas
 
 - El repositorio incluye `.gitignore` para evitar subir entornos locales (`.venv/`) y salidas generadas (`artifacts/`, `optuna/`).
 - Se incluye `.gitattributes` para forzar finales de línea `LF` en scripts `.sh` y evitar problemas de ejecución en Docker/Linux desde Windows.
